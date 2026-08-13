@@ -1,0 +1,73 @@
+name: pages
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CF_PAGES_PROJECT: opengl-renderer
+  CF_PAGES_URL: https://opengl-renderer.pages.dev
+
+jobs:
+  deploy-cloudflare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.4
+          actions-cache-folder: emsdk-cache
+      - name: Build cube wasm
+        run: python web/build.py --out dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: lab/package-lock.json
+      - name: Install lab dependencies
+        working-directory: lab
+        run: npm ci
+      - name: Regenerate lab data from committed bench results
+        working-directory: lab
+        run: npm run gen-data
+      - name: Build lab site (static prerender; prebuild stages the cube from dist/)
+        working-directory: lab
+        run: npm run build
+      - name: Preflight -- require Cloudflare secrets
+        env:
+          HAVE_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          HAVE_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        run: |
+          fail=0
+          if [ "$HAVE_TOKEN" != "true" ]; then
+            echo "FATAL: repo secret CLOUDFLARE_API_TOKEN is not set." >&2
+            echo "  Create a Custom API token (permission: Cloudflare Pages -- Edit," >&2
+            echo "  scoped to your account) at https://dash.cloudflare.com/profile/api-tokens" >&2
+            echo "  and add it under repo Settings -> Secrets and variables -> Actions." >&2
+            fail=1
+          fi
+          if [ "$HAVE_ACCOUNT" != "true" ]; then
+            echo "FATAL: repo secret CLOUDFLARE_ACCOUNT_ID is not set." >&2
+            echo "  Copy the Account ID from the Cloudflare dashboard (Workers & Pages" >&2
+            echo "  -> Overview, right sidebar) and add it under repo Settings ->" >&2
+            echo "  Secrets and variables -> Actions." >&2
+            fail=1
+          fi
+          exit $fail
+      - name: Deploy lab/dist/client to Cloudflare Pages (Direct Upload)
+        id: cf
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.114.0"
+          command: pages deploy lab/dist/client --project-name=${{ env.CF_PAGES_PROJECT }} --branch=main --commit-dirty=true
+      - name: Report deployment URL
+        run: echo "deployed ${{ steps.cf.outputs.deployment-url }} (production alias ${{ env.CF_PAGES_URL }})"
